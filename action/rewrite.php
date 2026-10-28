@@ -21,6 +21,7 @@ class action_plugin_move_rewrite extends DokuWiki_Action_Plugin {
     public function register(Doku_Event_Handler $controller) {
         $controller->register_hook('IO_WIKIPAGE_READ', 'AFTER', $this, 'handle_read', array());
         $controller->register_hook('PARSER_CACHE_USE', 'BEFORE', $this, 'handle_cache', array());
+        $controller->register_hook('PARSER_METADATA_RENDER', 'AFTER', $this, 'handle_metadata', array());
     }
 
     /**
@@ -105,6 +106,78 @@ class action_plugin_move_rewrite extends DokuWiki_Action_Plugin {
                         $cache->depends['purge'] = true;
                     else // FIXME: print error here or fail silently?
                         msg('Error: Page ' . hsc($id) . ' needs to be rewritten because of page renames but is not writable.', -1);
+                }
+            }
+        }
+    }
+
+    /**
+     * Add media and page links from local interwiki syntax (e.g. this>lib/exe/fetch.php?media=...)
+     * to the page metadata relations so DokuWiki's search indexer tracks them.
+     *
+     * @param Doku_Event $event The event object
+     * @param mixed      $param Optional parameters (not used)
+     */
+    public function handle_metadata(Doku_Event $event, $param) {
+        if (!isset($event->data['page']) || !isset($event->result['current'])) {
+            return;
+        }
+
+        $id = $event->data['page'];
+        $instructions = p_cached_instructions(wikiFN($id), false, $id);
+        if (!$instructions) return;
+
+        /** @var helper_plugin_move_handler $handler */
+        $handler = plugin_load('helper', 'move_handler');
+
+        foreach ($instructions as $ins) {
+            if ($ins[0] === 'interwikilink') {
+                $wiki = $ins[1][2];
+                $uri  = $ins[1][3];
+
+                $isLocal = $handler
+                    ? $handler->isLocalInterwiki($wiki)
+                    : (strtolower($wiki) === 'this');
+
+                if ($isLocal) {
+                    if (!isset($event->result['current']['relation']['media'])) {
+                        $event->result['current']['relation']['media'] = [];
+                    }
+                    if (!isset($event->result['current']['relation']['references'])) {
+                        $event->result['current']['relation']['references'] = [];
+                    }
+
+                    // 1. fetch.php / detail.php with ?media=
+                    if (preg_match('/(?:lib\/exe\/)?(?:fetch|detail)\.php\?[^#]*\bmedia=([^&#|]+)/i', $uri, $m)) {
+                        $media = cleanID(urldecode($m[1]));
+                        if ($media !== '') {
+                            $event->result['current']['relation']['media'][$media] = file_exists(mediaFN($media));
+                        }
+                    // 2. fetch.php / detail.php with PATH_INFO
+                    } elseif (preg_match('/(?:lib\/exe\/)?(?:fetch|detail)\.php\/([^?#|]+)/i', $uri, $m)) {
+                        $media = cleanID(urldecode($m[1]));
+                        if ($media !== '') {
+                            $event->result['current']['relation']['media'][$media] = file_exists(mediaFN($media));
+                        }
+                    // 3. _media / _detail
+                    } elseif (preg_match('/^_(?:media|detail)\/([^?#|]+)/i', $uri, $m)) {
+                        $media = cleanID(urldecode($m[1]));
+                        if ($media !== '') {
+                            $event->result['current']['relation']['media'][$media] = file_exists(mediaFN($media));
+                        }
+                    // 4. doku.php?id=
+                    } elseif (preg_match('/(?:lib\/exe\/)?doku\.php\?[^#]*\bid=([^&#|]+)/i', $uri, $m)) {
+                        $page = cleanID(urldecode($m[1]));
+                        if ($page !== '') {
+                            $event->result['current']['relation']['references'][$page] = page_exists($page);
+                        }
+                    // 5. doku.php/ PATH_INFO
+                    } elseif (preg_match('/(?:lib\/exe\/)?doku\.php\/([^?#|]+)/i', $uri, $m)) {
+                        $page = cleanID(urldecode($m[1]));
+                        if ($page !== '') {
+                            $event->result['current']['relation']['references'][$page] = page_exists($page);
+                        }
+                    }
                 }
             }
         }

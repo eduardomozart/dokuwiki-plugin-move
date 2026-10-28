@@ -240,6 +240,7 @@ class helper_plugin_move_op extends DokuWiki_Plugin {
 
         // get all pages using this media
         $affected_pages = idx_get_indexer()->lookupKey('relation_media', $src);
+        $affected_pages = $this->findUnindexedPagesForMedia($src, $affected_pages);
 
         $src_ns   = getNS($src);
         $src_name = noNS($src);
@@ -319,5 +320,27 @@ class helper_plugin_move_op extends DokuWiki_Plugin {
      */
     public function getAffectedPages() {
         return $this->affectedPages;
+    }
+
+    /**
+     * Find pages that contain references to a media file in wikitext but might not be in
+     * the relation_media index yet (e.g. pages linking via this>lib/exe/fetch.php?media=...).
+     *
+     * @param string $src        Media ID
+     * @param array  $knownPages Already known page IDs
+     * @return array Merged unique list of page IDs
+     */
+    public function findUnindexedPagesForMedia($src, array $knownPages = []) {
+        if (class_exists('dokuwiki\Search\FulltextSearch')) {
+            $ft = new \dokuwiki\Search\FulltextSearch();
+            $hl = [];
+            $ft_pages = array_keys($ft->pageSearch($src, $hl));
+            foreach ($ft_pages as $page) {
+                if (!in_array($page, $knownPages) && strpos(rawWiki($page), $src) !== false) {
+                    $knownPages[] = $page;
+                }
+            }
+        }
+        return $knownPages;
     }
 }

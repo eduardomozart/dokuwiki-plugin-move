@@ -313,13 +313,17 @@ class helper_plugin_move_handler extends Plugin {
 
         if(preg_match('/^[a-zA-Z0-9\.]+>{1}.*$/u', $link[0])) {
             // Interwiki
-            $this->wikitext .= $match;
+            $this->wikitext .= $this->rewrite_interwiki($match, $link[0]);
         } elseif(preg_match('/^\\\\\\\\[^\\\\]+?\\\\/u', $link[0])) {
             // Windows Share
             $this->wikitext .= $match;
         } elseif(preg_match('#^([a-z0-9\-\.+]+?)://#i', $link[0])) {
             // external link (accepts all protocols)
-            $this->wikitext .= $match;
+            if ($this->isLocalUrl($link[0])) {
+                $this->wikitext .= $this->rewrite_local_url($match, $link[0]);
+            } else {
+                $this->wikitext .= $match;
+            }
         } elseif(preg_match('<' . PREG_PATTERN_VALID_EMAIL . '>', $link[0])) {
             // E-Mail (pattern above is defined in inc/mail.php)
             $this->wikitext .= $match;
@@ -403,6 +407,186 @@ class helper_plugin_move_handler extends Plugin {
             }
         }
         return $match;
+    }
+
+    /**
+     * Rewrite an interwiki link if it targets the local wiki (e.g. this>lib/exe/fetch.php?media=...)
+     *
+     * @param string $match     The original matched wikitext
+     * @param string $urlTarget The link target (without title)
+     * @return string The rewritten wikitext
+     */
+    public function rewrite_interwiki($match, $urlTarget) {
+        [$wiki, $url] = explode('>', $urlTarget, 2);
+        if (!$this->isLocalInterwiki($wiki)) {
+            return $match;
+        }
+
+        return $this->rewrite_endpoint_url($match, $url);
+    }
+
+    /**
+     * Rewrite a local absolute URL link if it targets local media/page endpoints
+     *
+     * @param string $match The original matched wikitext
+     * @param string $url   The link target
+     * @return string
+     */
+    public function rewrite_local_url($match, $url) {
+        $rel = $url;
+        if (defined('DOKU_URL') && DOKU_URL !== '' && strpos($rel, DOKU_URL) === 0) {
+            $rel = substr($rel, strlen(DOKU_URL));
+        } elseif (defined('DOKU_BASE') && DOKU_BASE !== '' && strpos($rel, DOKU_BASE) === 0) {
+            $rel = substr($rel, strlen(DOKU_BASE));
+        }
+        return $this->rewrite_endpoint_url($match, $rel);
+    }
+
+    /**
+     * Rewrite endpoints such as fetch.php, detail.php, _media/, _detail/, and doku.php
+     *
+     * @param string $match The original matched wikitext
+     * @param string $url   The URL path/query to check
+     * @return string
+     */
+    public function rewrite_endpoint_url($match, $url) {
+        // 1. fetch.php / detail.php with query parameter ?media= (userewrite = 0 or general query)
+        if (preg_match('/(?:lib\/exe\/)?(?:fetch|detail)\.php\?[^#]*\bmedia=([^&#|]+)/i', $url, $m)) {
+            return $this->replaceUrlParam($match, 'media=', $m[1], 'media');
+        }
+
+        // 2. fetch.php / detail.php with PATH_INFO (userewrite = 2)
+        if (preg_match('/(?:lib\/exe\/)?(?:fetch|detail)\.php\/([^?#|]+)/i', $url, $m)) {
+            return $this->replaceUrlPath($match, $m[1], 'media');
+        }
+
+        // 3. _media / _detail clean URLs (userewrite = 1)
+        if (preg_match('/^_(?:media|detail)\/([^?#|]+)/i', $url, $m)) {
+            return $this->replaceUrlPath($match, $m[1], 'media');
+        }
+
+        // 4. doku.php with query parameter ?id=
+        if (preg_match('/(?:lib\/exe\/)?doku\.php\?[^#]*\bid=([^&#|]+)/i', $url, $m)) {
+            return $this->replaceUrlParam($match, 'id=', $m[1], 'page');
+        }
+
+        // 5. doku.php with PATH_INFO (userewrite = 2)
+        if (preg_match('/(?:lib\/exe\/)?doku\.php\/([^?#|]+)/i', $url, $m)) {
+            return $this->replaceUrlPath($match, $m[1], 'page');
+        }
+
+        return $match;
+    }
+
+    /**
+     * Replace a query parameter value in the URL part of a link match
+     *
+     * @param string $match      The full link markup match
+     * @param string $prefix     e.g. 'media=' or 'id='
+     * @param string $raw_target The raw parameter value
+     * @param string $type       'media' or 'page'
+     * @return string
+     */
+    protected function replaceUrlParam($match, $prefix, $raw_target, $type) {
+        $decoded = urldecode($raw_target);
+        $uses_slash = (strpos($decoded, '/') !== false && strpos($decoded, ':') === false);
+        $id_to_resolve = $uses_slash ? str_replace('/', ':', $decoded) : $decoded;
+        $has_leading_colon = ($id_to_resolve !== '' && $id_to_resolve[0] === ':');
+
+        $new_id = $this->resolveMoves($id_to_resolve, $type);
+        if ($new_id !== cleanID($id_to_resolve)) {
+            if ($has_leading_colon) $new_id = ':' . $new_id;
+            if ($uses_slash) $new_id = str_replace(':', '/', $new_id);
+
+            $new_raw = (stripos($raw_target, '%3a') !== false)
+                ? str_replace(':', '%3A', $new_id)
+                : $new_id;
+
+            $pipe_pos = strpos($match, '|');
+            $search_limit = ($pipe_pos !== false) ? $pipe_pos : strlen($match);
+            $url_part = substr($match, 0, $search_limit);
+            $param_pos = strpos($url_part, $prefix . $raw_target);
+            if ($param_pos !== false) {
+                $val_pos = $param_pos + strlen($prefix);
+                return substr_replace($match, $new_raw, $val_pos, strlen($raw_target));
+            }
+        }
+        return $match;
+    }
+
+    /**
+     * Replace a path segment value in the URL part of a link match
+     *
+     * @param string $match      The full link markup match
+     * @param string $raw_target The raw path segment
+     * @param string $type       'media' or 'page'
+     * @return string
+     */
+    protected function replaceUrlPath($match, $raw_target, $type) {
+        $decoded = urldecode($raw_target);
+        $uses_slash = (strpos($decoded, '/') !== false && strpos($decoded, ':') === false);
+        $id_to_resolve = $uses_slash ? str_replace('/', ':', $decoded) : $decoded;
+        $has_leading_colon = ($id_to_resolve !== '' && $id_to_resolve[0] === ':');
+
+        $new_id = $this->resolveMoves($id_to_resolve, $type);
+        if ($new_id !== cleanID($id_to_resolve)) {
+            if ($has_leading_colon) $new_id = ':' . $new_id;
+            if ($uses_slash) $new_id = str_replace(':', '/', $new_id);
+
+            $new_raw = (stripos($raw_target, '%3a') !== false)
+                ? str_replace(':', '%3A', $new_id)
+                : $new_id;
+
+            $pipe_pos = strpos($match, '|');
+            $search_limit = ($pipe_pos !== false) ? $pipe_pos : strlen($match);
+            $url_part = substr($match, 0, $search_limit);
+            $pos = strpos($url_part, $raw_target);
+            if ($pos !== false) {
+                return substr_replace($match, $new_raw, $pos, strlen($raw_target));
+            }
+        }
+        return $match;
+    }
+
+    /**
+     * Check if an interwiki shortcut refers to the local wiki
+     *
+     * @param string $wiki
+     * @return bool
+     */
+    public function isLocalInterwiki($wiki) {
+        if (strtolower($wiki) === 'this') return true;
+        if (!function_exists('getInterwiki')) return false;
+        $wikis = getInterwiki();
+        $wiki = strtolower($wiki);
+        if (!isset($wikis[$wiki])) return false;
+        $target = $wikis[$wiki];
+        if (strpos($target, '{DOKU_BASE}') !== false || strpos($target, '{DOKU_URL}') !== false) {
+            return true;
+        }
+        if (defined('DOKU_URL') && DOKU_URL !== '' && strpos($target, DOKU_URL) === 0) {
+            return true;
+        }
+        if (defined('DOKU_BASE') && DOKU_BASE !== '' && strpos($target, DOKU_BASE) === 0) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Check if a full URL points to the local wiki
+     *
+     * @param string $url
+     * @return bool
+     */
+    public function isLocalUrl($url) {
+        if (defined('DOKU_URL') && DOKU_URL !== '' && strpos($url, DOKU_URL) === 0) {
+            return true;
+        }
+        if (defined('DOKU_BASE') && DOKU_BASE !== '' && strpos($url, DOKU_BASE) === 0) {
+            return true;
+        }
+        return false;
     }
 
     /**

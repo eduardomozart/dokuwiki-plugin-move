@@ -746,6 +746,10 @@ class helper_plugin_move_plan extends DokuWiki_Plugin {
             unset($page);
         } else if($type == self::TYPE_MEDIA) {
             $pages = $idx->lookupKey('relation_media', $src_);
+            // Also find pages that might not be in relation_media index yet (e.g. pages linking via this>lib/exe/fetch.php)
+            if ($class != self::CLASS_NS && $this->MoveOperator) {
+                $pages = $this->MoveOperator->findUnindexedPagesForMedia($src, $pages);
+            }
         }
 
         $this->addToAffectedPagesList($pages);

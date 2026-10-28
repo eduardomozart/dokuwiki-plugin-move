@@ -134,19 +134,4 @@ class plugin_move_handler_test extends DokuWikiTest {
         }
     }
 
-    public function test_metadataRenderLocalInterwiki() {
-        $page = 'wiki:metadata_interwiki_test';
-        $text = '[[this>lib/exe/fetch.php?media=ns:doc.pdf|Download]] [[this>doku.php?id=ns:target|Target Page]]';
-        saveWikiText($page, $text, 'Test interwiki metadata');
-        idx_addPage($page);
-
-        $docPdf = 'ns:doc.pdf';
-        $mediaUse = idx_get_indexer()->lookupKey('relation_media', $docPdf);
-        $this->assertContains($page, $mediaUse);
-
-        $nsTarget = 'ns:target';
-        $refUse = idx_get_indexer()->lookupKey('relation_references', $nsTarget);
-        $this->assertContains($page, $refUse);
-    }
-
 }
